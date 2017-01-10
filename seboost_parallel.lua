@@ -85,6 +85,7 @@ function optim.seboost(opfunc, x, config, state)
   local sesopLabels = config.sesopLabels
   local sesopBatchSize = config.sesopBatchSize or 100
   config.nodeIters = config.nodeIters or 100
+  config.merger = config.merger or 'sesop'
   
   state.itr = state.itr or 0
 	config.numNodes = config.numNodes or 2  
@@ -109,6 +110,11 @@ function optim.seboost(opfunc, x, config, state)
   if (config.worker == nil) then
     --MASTER--
     --print ('MASTER SESOP begin')
+    config.histSize = config.histSize or 0
+    if config.histSize ~=0 then
+      state.histspace = state.histspace or torch.zeros(x:size(1),config.histSize):cuda()
+    end
+  
     state.splitPoint = state.splitPoint or x:clone() --the first split point is the first point
 
     config.master:block_on_workers()
@@ -117,7 +123,7 @@ function optim.seboost(opfunc, x, config, state)
     if (state.dirs == nil) then
       --if it is the first time
       state.dirs = torch.zeros(x:size(1), config.numNodes)
-      state.aOpt = torch.zeros(config.numNodes)
+      state.aOpt = torch.zeros(config.numNodes + config.histSize)
       --state.aOpt[1] = 1 --we start from taking the first node direction (maybe start from avrage?).
         
       if (isCuda) then
@@ -126,46 +132,92 @@ function optim.seboost(opfunc, x, config, state)
       end
     end
     
-    state.aOpt:copy(torch.ones(config.numNodes)*(1/config.numNodes)) --avrage
+    state.aOpt:copy(torch.ones(config.numNodes + config.histSize)*(1/(config.numNodes + config.histSize))) --avrage
+    
     state.dirs[{ {}, 1 }]:copy(x - state.splitPoint)
     --SV, build directions matrix
     for i = 1, config.numNodes - 1 do   
       --[{ {}, i }] means: all of the first dim, slice in the second dim at i = get i col.
       state.dirs[{ {}, i + 1 }]:copy(config.master.remote_models[i - 1] - state.splitPoint)
     end
+    
 
-
+  
+    --Tao Code
+    local temp_dir = nil
+    if config.histSize ~= 0 then
+       temp_dir = torch.cat(state.dirs, state.histspace, 2)
+    else 
+       temp_dir = state.dirs
+    end
+  
     --now optimize!
     local xInit = state.splitPoint
+    
       -- create mini batch
     local subT = (state.sesopIteration) * sesopBatchSize + 1
     subT = subT % (sesopData:size(1) - sesopBatchSize) --Calculate the next batch index
     local sesopInputs = sesopData:narrow(1, subT, sesopBatchSize)
     local sesopTargets = sesopLabels:narrow(1, subT, sesopBatchSize)
     
-    --print(sesopInputs:size())
-    if isCuda then
-    --  sesopInputs = sesopInputs:cuda()
-    --  sesopTargets = sesopTargets:cuda()
-    end
 
     -- Create inner opfunc for finding a*
     local feval = function(a)
       --A function of the coefficients
-      local dirMat = state.dirs
+      local dirMat = temp_dir
       --Note that opfunc also gets the batch
       local afx, adfdx = opfunc(xInit + dirMat*a, sesopInputs, sesopTargets)
       return afx, (dirMat:t()*adfdx)
     end
     --x,f(x)
-    config.maxIter = config.numNodes
-    local _, fHist = optim.cg(feval, state.aOpt, config, state) --Apply optimization using inner function
-       
+    config.maxIter = config.numNodes + config.histSize
+    
+    local _ = nil
+    local fHist = nil
+    
+    if config.merger == 'avrage' then
+      _, fHist = feval(state.aOpt)
+    else if config.merger == 'min' then
+      
+      state.aOpt:copy(torch.zeros(config.numNodes + config.histSize))
+      
+      local bestIdx = 1
+      state.aOpt[1] = 1
+      local _, bestF = feval(state.aOpt)
+      state.aOpt[1] = 0
+      
+      for i = 2, config.numNodes + config.histSize do 
+        state.aOpt[i] = 1
+        local _, f = feval(state.aOpt)
+        state.aOpt[i] = 0
+        
+        if f < bestF then
+          bestIdx = i
+          bestF = f
+        end
+      end
+      fHist = bestF
+      state.aOpt[bestIdx] = 1
+    else
+      _, fHist = optim.cg(feval, state.aOpt, config, state) --Apply optimization using inner function
+    end
+  
     --updating model weights!
     x:copy(xInit)
-    local sesopDir = state.dirs*state.aOpt 
+    local sesopDir = temp_dir*state.aOpt 
     x:add(sesopDir)
-      
+    
+    --Tao code update the history direction here
+    if config.histSize ~= 0 then
+      if config.histSize == 1 then
+        state.histspace = x - xInit
+      else
+      --we throw out the vector in column state.histSize
+      --we insert instead a new vector in column 1.
+      state.histspace = torch.cat(x - xInit, state.histspace:narrow(2, 1, config.histSize - 1), 2)
+      end
+    end
+  
     --the new split point is 'x'.
     --The next time this function is called will be with 'x'.
     --The next time we will change a node, it will get this 'x'.

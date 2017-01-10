@@ -14,19 +14,30 @@ opt = lapp[[
    -m,--momentum              (default 0.9)         momentum
    --epoch_step               (default 25)          epoch step
    --model                    (default vgg_bn_drop)     model name
-   --max_epoch                (default 300)           maximum number of iterations
+   --max_epoch                (default 100)           maximum number of iterations
    --backend                  (default nn)            backend
    --type                     (default cuda)          cuda/float/cl
    -n,--num_of_nodes          (default 1)             Number of nodes to run.
-   -i,--id          (default 0)             id of the node.
-   -f, --merge_freq          (default 130)             SESOP frequancy.
-   --sesop_batch_size    (default 1000)            SESOP base batch size.
-   --port                (default 8080)            port for communication between solvers.
-   --optimizer           (sgd)            internal optimizer fuinction.
-   
+   -i,--id                    (default 0)             id of the node.
+   -f, --merge_freq           (default 130)             SESOP frequancy.
+   --sesop_batch_size         (default 1000)            SESOP base batch size.
+   --port                     (default 8080)            port for communication between solvers.
+   --optimizer                (default "sgd")            internal optimizer fuinction.
+   -h,--history_size          (default 5)            sesop history size.
+   -m,--merger                (default "sesop")            internal optimizer fuinction.
 ]]
 
-optimizer = optim.sgd
+local ipc = require 'libipc'
+local sys = require 'sys'
+require 'cunn'
+
+if (opt.num_of_nodes > 1) then
+  require 'seboost_parallel'
+else
+  require 'seboost'
+end
+
+local optimizer = optim.sgd
 if (opt.optimizer == 'adagrad') then
   optimizer = optim.adagrad
 end
@@ -136,17 +147,9 @@ function copy2(obj)
 end
 
 print(c.blue'==>' ..' configuring optimizer')
-if(opt.num_of_nodes == 1) then
-  optimState = {
-    learningRate = opt.learningRate,
-    weightDecay = opt.weightDecay,
-    momentum = opt.momentum,
-    learningRateDecay = opt.learningRateDecay,
-  }
-else --if we use sesop, we dont need any optimState parameters, as they are set internally.
-  optimState = { }
-  sesopConfig = {
-        --optMethod=optim.adadelta, 
+
+optimState = { }
+sesopConfig = {
         optMethod=optimizer, 
         sesopData=provider.trainData.data,
         sesopLabels=provider.trainData.labels,
@@ -160,22 +163,13 @@ else --if we use sesop, we dont need any optimState parameters, as they are set 
         
         sesopBatchSize=sesop_batch_size,
         numNodes=opt.num_of_nodes,
-        --nodeIters=math.ceil(130/(math.log(opt.num_of_nodes, 2))),
-        nodeIters=opt.merge_freq
-        --nodeIters=100
-        --nodeIters=1
-  }
-    
-    print(sesopConfig)
-end
+        nodeIters=opt.merge_freq,
+        histSize=opt.history_size
+        merger=opt.merger
+}  
+print(sesopConfig)
 
 
-
-local ipc = require 'libipc'
-local sys = require 'sys'
-require 'cunn'
-
-require 'seboost_parallel'
 
 if(opt.num_of_nodes > 1) then
   if (opt.id == 0) then
@@ -192,10 +186,6 @@ trainLoss = torch.Tensor(opt.max_epoch + 1)
 trainError = torch.Tensor(opt.max_epoch + 1)
 testError = torch.Tensor(opt.max_epoch + 1)
 
-local numOfIterations = math.ceil((provider.trainData.data:size(1)/opt.batchSize)*opt.max_epoch)
-trainLossFull = torch.Tensor(numOfIterations)
-
-
 function train()
   model:training()
   epoch = epoch or 1
@@ -206,11 +196,7 @@ function train()
   
   -- drop learning rate every "epoch_step" epochs
   if epoch % opt.epoch_step == 0 then 
-    if(opt.num_of_nodes == 1) then
-      optimState.learningRate = optimState.learningRate/2
-    else
-      sesopConfig.optConfig.learningRate = sesopConfig.optConfig.learningRate/2 
-    end
+    sesopConfig.optConfig.learningRate = sesopConfig.optConfig.learningRate/2 
   end
   
   --We pretend as we have opt.num_of_nodes nodes.
@@ -242,7 +228,6 @@ function train()
       local f = criterion:forward(outputs, _targets)
       
       --save the full train loss to evaluate SESOP
-      trainLossFull[iter] = f
       iter = iter + 1
       
       trainLoss[epoch] = trainLoss[epoch] + f
@@ -254,17 +239,10 @@ function train()
         confusion:batchAdd(outputs, _targets)
       end
       
-      --SV EXPERIMENT! Drop update
-      --torch.cmul(gradParameters, gradParameters, torch.Tensor(gradParameters:size()):random(0,1):cuda())
-      
       return f,gradParameters
     end
       
-    if(opt.num_of_nodes == 1) then
-        optimizer(feval, parameters, optimState)
-    else
-      optim.seboost(feval, parameters, sesopConfig, optimState)
-    end
+    optim.seboost(feval, parameters, sesopConfig, optimState)
   end
   
   confusion:updateValids()
@@ -273,7 +251,6 @@ function train()
   trainError[epoch] = 1 - confusion.totalValid
   torch.save(opt.save..'/trainLoss.txt', trainLoss)
   torch.save(opt.save..'/trainError.txt', trainError)
-  torch.save(opt.save..'/trainLossFull.txt', trainLossFull)
   torch.save(opt.save..'/epoch.txt', epoch)
   
   print(('Train accuracy: '..c.cyan'%.2f'..' %%\t time: %.2f s'):format(

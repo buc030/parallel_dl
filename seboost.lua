@@ -53,7 +53,7 @@ function optim.seboost(opfunc, x, config, state)
   local timer = torch.Timer()
 
   x,fx = config.optMethod(opfunc, x, config.optConfig) -- Apply regular optimization method, changing the model directly
-  if (state.itr % sesopUpdate) ~= 0 then -- Not a sesop iteration.
+  if (state.itr % sesopUpdate) ~= 0 or histSize == 0 then -- Not a sesop iteration.
     return x,fx
   end
 
@@ -117,8 +117,8 @@ function optim.seboost(opfunc, x, config, state)
   local sesopInputs = sesopData:narrow(1, subT, sesopBatchSize)
   local sesopTargets = sesopLabels:narrow(1, subT, sesopBatchSize)
   if isCuda then
-    sesopInputs = sesopInputs:cuda()
-    sesopTargets = sesopTargets:cuda()
+    --sesopInputs = sesopInputs:cuda()
+    --sesopTargets = sesopTargets:cuda()
   end
 
   -- Create inner opfunc for finding a*
