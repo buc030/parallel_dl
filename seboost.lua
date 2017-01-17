@@ -49,14 +49,15 @@ function optim.seboost(opfunc, x, config, state)
   state.sesopLastX = state.sesopLastX or x:clone() --Never forget to clone!
   state.itr = state.itr or 0
   state.itr = state.itr + 1
-
+  
+  
   local timer = torch.Timer()
 
   x,fx = config.optMethod(opfunc, x, config.optConfig) -- Apply regular optimization method, changing the model directly
   if (state.itr % sesopUpdate) ~= 0 or histSize == 0 then -- Not a sesop iteration.
     return x,fx
   end
-
+  
   ------------------------- SESOP Part ----------------------------
 
   --Set some initial values
@@ -81,7 +82,9 @@ function optim.seboost(opfunc, x, config, state)
   state.dirs = state.dirs or torch.zeros(x:size(1), histSize+anchorsSize)
   state.anchors = state.anchors or torch.zeros(x:size(1), anchorsSize)
   state.aOpt = torch.zeros(histSize+anchorsSize)
-
+  state.norms = state.norms or torch.zeros(1)
+  state.f_vals = state.f_vals or torch.zeros(1)
+  
   if (isCuda) then
     state.dirs = state.dirs:cuda()
     state.anchors = state.anchors:cuda()
@@ -127,9 +130,21 @@ function optim.seboost(opfunc, x, config, state)
     local dirMat = state.dirs
     --Note that opfunc also gets the batch
     local afx, adfdx = opfunc(xInit+dirMat*a, sesopInputs, sesopTargets)
-    return afx, (dirMat:t()*adfdx)
+    
+    local adfda = (dirMat:t()*adfdx)
+    local norm_test = adfda:norm()*torch.ones(1)
+    
+    state.norms = torch.cat(state.norms, norm_test, 1)
+    torch.save(config.save..'/cg_grad_norms.txt', state.norms)
+    
+    state.f_vals = torch.cat(state.f_vals, afx*torch.ones(1), 1)
+    torch.save(config.save..'/cg_f_vals.txt', state.f_vals)
+    
+    
+    return afx, adfda
   end
-
+  config.maxIter=200
+  
   local _, fHist = optim.cg(feval, state.aOpt, config, state) --Apply optimization using inner function
 
   --print(fHist)

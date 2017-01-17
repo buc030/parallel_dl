@@ -27,6 +27,7 @@ opt = lapp[[
    -m,--merger                (default "sesop")            internal optimizer fuinction.
 ]]
 
+opt.backend = 'cudnn' 
 local ipc = require 'libipc'
 local sys = require 'sys'
 require 'cunn'
@@ -153,7 +154,9 @@ sesopConfig = {
         optMethod=optimizer, 
         sesopData=provider.trainData.data,
         sesopLabels=provider.trainData.labels,
+        sesopUpdate=opt.merge_freq,
         isCuda=true,
+        save=opt.save,
         optConfig={
           learningRate = opt.learningRate,
           weightDecay = opt.weightDecay,
@@ -164,7 +167,7 @@ sesopConfig = {
         sesopBatchSize=sesop_batch_size,
         numNodes=opt.num_of_nodes,
         nodeIters=opt.merge_freq,
-        histSize=opt.history_size
+        histSize=opt.history_size,
         merger=opt.merger
 }  
 print(sesopConfig)

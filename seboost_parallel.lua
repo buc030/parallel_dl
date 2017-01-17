@@ -170,25 +170,26 @@ function optim.seboost(opfunc, x, config, state)
       return afx, (dirMat:t()*adfdx)
     end
     --x,f(x)
-    config.maxIter = config.numNodes + config.histSize
+    --config.maxIter = config.numNodes + config.histSize
+    config.maxIter = config.histSize + config.numNodes + 15
     
     local _ = nil
     local fHist = nil
     
     if config.merger == 'avrage' then
-      _, fHist = feval(state.aOpt)
-    else if config.merger == 'min' then
+      fHist, _ = feval(state.aOpt)
+    elseif config.merger == 'min' then
       
       state.aOpt:copy(torch.zeros(config.numNodes + config.histSize))
       
       local bestIdx = 1
       state.aOpt[1] = 1
-      local _, bestF = feval(state.aOpt)
+      local bestF, _ = feval(state.aOpt)
       state.aOpt[1] = 0
       
       for i = 2, config.numNodes + config.histSize do 
         state.aOpt[i] = 1
-        local _, f = feval(state.aOpt)
+        local f, _ = feval(state.aOpt)
         state.aOpt[i] = 0
         
         if f < bestF then
