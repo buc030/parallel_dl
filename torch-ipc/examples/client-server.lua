@@ -7,7 +7,7 @@ Options:
    -i,--iterations      (default 1000)                   number of send/recv iterations
    --verify                                              verify contents of transmission (slows things down)
    --verbose                                             print lots of network stats
-   --cuda                                                use CUDA tensors
+   --cuda                (default True)                  use CUDA tensors
 ]]
 
 -- Load our requires

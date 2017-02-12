@@ -14,36 +14,36 @@ end
 -- space as we can
 local MaxPooling = nn.SpatialMaxPooling
 
-ConvBNReLU(3,64)--:add(nn.Dropout(0.3))
+ConvBNReLU(3,64):add(nn.Dropout(0.3))
 ConvBNReLU(64,64)
 vgg:add(MaxPooling(2,2,2,2):ceil())
 
-ConvBNReLU(64,128)--:add(nn.Dropout(0.4))
+ConvBNReLU(64,128):add(nn.Dropout(0.4))
 ConvBNReLU(128,128)
 vgg:add(MaxPooling(2,2,2,2):ceil())
 
-ConvBNReLU(128,256)--:add(nn.Dropout(0.4))
-ConvBNReLU(256,256)--:add(nn.Dropout(0.4))
+ConvBNReLU(128,256):add(nn.Dropout(0.4))
+ConvBNReLU(256,256):add(nn.Dropout(0.4))
 ConvBNReLU(256,256)
 vgg:add(MaxPooling(2,2,2,2):ceil())
 
-ConvBNReLU(256,512)--:add(nn.Dropout(0.4))
-ConvBNReLU(512,512)--:add(nn.Dropout(0.4))
+ConvBNReLU(256,512):add(nn.Dropout(0.4))
+ConvBNReLU(512,512):add(nn.Dropout(0.4))
 ConvBNReLU(512,512)
 vgg:add(MaxPooling(2,2,2,2):ceil())
 
-ConvBNReLU(512,512)--:add(nn.Dropout(0.4))
-ConvBNReLU(512,512)--:add(nn.Dropout(0.4))
+ConvBNReLU(512,512):add(nn.Dropout(0.4))
+ConvBNReLU(512,512):add(nn.Dropout(0.4))
 ConvBNReLU(512,512)
 vgg:add(MaxPooling(2,2,2,2):ceil())
 vgg:add(nn.View(512))
 
 classifier = nn.Sequential()
---classifier:add(nn.Dropout(0.5))
+classifier:add(nn.Dropout(0.5))
 classifier:add(nn.Linear(512,512))
 classifier:add(nn.BatchNormalization(512))
 classifier:add(nn.ReLU(true))
---classifier:add(nn.Dropout(0.5))
+classifier:add(nn.Dropout(0.5))
 classifier:add(nn.Linear(512,10))
 vgg:add(classifier)
 

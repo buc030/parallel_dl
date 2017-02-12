@@ -17,7 +17,10 @@ do --define server
 
   --n is the number of workers.
   function Master:__init(x, n, port)
+    print('before ipc.server '..port)
     self.server = ipc.server('127.0.0.1', port)
+    print('after ipc.server')
+
     self.remote_models = {}
     self.next_free = 0
     self.n = n
@@ -25,6 +28,11 @@ do --define server
     for i = 0, n - 1 do
       self.remote_models[i] = x:clone()
     end
+    
+    --connect to clients. This blocks untill all clients connect.
+    self.server:clients(n, function(client)
+        print('connected to client')
+    end)
     
   end
   
@@ -56,7 +64,9 @@ do --define server
   --define worker
   local Worker = torch.class('Worker')
   function Worker:__init(id, port)
+    print('before ipc.client '..port)
     self.client = ipc.client('127.0.0.1', port)
+    print('after ipc.client')
     self.id = id
   end
   
@@ -77,7 +87,6 @@ end
 
 
 function optim.seboost(opfunc, x, config, state)
-
   -- get/update state
   local state = state or config
   local isCuda = config.isCuda or false
@@ -93,23 +102,25 @@ function optim.seboost(opfunc, x, config, state)
   state.itr = state.itr + 1
   
   if (state.itr % config.nodeIters ~= 0) then
+    --print ('SEBOOST PARALLEL')
+    --print(fx)
     x,fx = config.optMethod(opfunc, x, config.optConfig)
     return x,fx
   end
     
   if (config.master == nil) then
     --WORKER--
-    --print ('WORKER SESOP begin')
     config.worker:send_to_master(x)
+    
     config.worker:recv_from_master(x)
     local fHist = {}
     fHist = config.worker:recv_from_master(fHist)
+    
     return x, fHist
   end
 
   if (config.worker == nil) then
     --MASTER--
-    --print ('MASTER SESOP begin')
     config.histSize = config.histSize or 0
     if config.histSize ~=0 then
       state.histspace = state.histspace or torch.zeros(x:size(1),config.histSize):cuda()
@@ -132,7 +143,8 @@ function optim.seboost(opfunc, x, config, state)
       end
     end
     
-    state.aOpt:copy(torch.ones(config.numNodes + config.histSize)*(1/(config.numNodes + config.histSize))) --avrage
+    --state.aOpt:copy(torch.ones(config.numNodes + config.histSize)*(1/(config.numNodes + config.histSize))) --avrage
+    state.aOpt:copy(torch.zeros(config.numNodes + config.histSize))
     
     state.dirs[{ {}, 1 }]:copy(x - state.splitPoint)
     --SV, build directions matrix
@@ -159,7 +171,6 @@ function optim.seboost(opfunc, x, config, state)
     subT = subT % (sesopData:size(1) - sesopBatchSize) --Calculate the next batch index
     local sesopInputs = sesopData:narrow(1, subT, sesopBatchSize)
     local sesopTargets = sesopLabels:narrow(1, subT, sesopBatchSize)
-    
 
     -- Create inner opfunc for finding a*
     local feval = function(a)
@@ -171,12 +182,13 @@ function optim.seboost(opfunc, x, config, state)
     end
     --x,f(x)
     --config.maxIter = config.numNodes + config.histSize
-    config.maxIter = config.histSize + config.numNodes + 15
+    config.maxIter = config.histSize + config.numNodes + 20
     
     local _ = nil
     local fHist = nil
     
     if config.merger == 'avrage' then
+      state.aOpt:copy(torch.ones(config.numNodes + config.histSize)*(1/(config.numNodes + config.histSize))) --avrage
       fHist, _ = feval(state.aOpt)
     elseif config.merger == 'min' then
       
@@ -200,6 +212,8 @@ function optim.seboost(opfunc, x, config, state)
       fHist = bestF
       state.aOpt[bestIdx] = 1
     else
+      --state.aOpt:copy(torch.zeros(config.numNodes + config.histSize))
+      state.aOpt:copy(torch.ones(config.numNodes + config.histSize)*(1/(config.numNodes + config.histSize))) --avrage
       _, fHist = optim.cg(feval, state.aOpt, config, state) --Apply optimization using inner function
     end
   
@@ -228,6 +242,7 @@ function optim.seboost(opfunc, x, config, state)
       
     config.master:broadcast_to_workers(x)
     config.master:broadcast_to_workers(fHist)
+    
     return x,fHist
   end  
 end

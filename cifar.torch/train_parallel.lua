@@ -2,7 +2,7 @@ require 'xlua'
 require 'optim'
 require 'nn'
 require 'image'
-dofile './provider.lua'
+
 local c = require 'trepl.colorize'
 
 opt = lapp[[
@@ -14,6 +14,7 @@ opt = lapp[[
    -m,--momentum              (default 0.9)         momentum
    --epoch_step               (default 25)          epoch step
    --model                    (default vgg_bn_drop)     model name
+   --layers                   (default 4)             Number of layers (in case of simple model)
    --max_epoch                (default 100)           maximum number of iterations
    --backend                  (default nn)            backend
    --type                     (default cuda)          cuda/float/cl
@@ -48,7 +49,9 @@ end
 if (opt.optimizer == 'adadelta') then
   optimizer = optim.adadelta
 end
-
+if (opt.optimizer == 'rprop') then
+  optimizer = optim.rprop
+end
 
 --opt.save = opt.save..'/n_'..opt.num_of_nodes..'_lrd_'..opt.epoch_step..'/id_'..opt.id
 --opt.epoch_step = math.ceil(opt.epoch_step/opt.num_of_nodes) --we mult the epoch_step to acount for multiple nodes.
@@ -65,7 +68,7 @@ do -- data augmentation module
 
   function BatchFlip:updateOutput(input)
     --print('start BatchFlip:updateOutput')
-    if self.train then
+    if false and self.train and opt.model ~= 'simple' then
       local bs = input:size(1)
       local flip_mask = torch.randperm(bs):le(bs/2)
       --print(flip_mask)
@@ -122,7 +125,19 @@ print(model)
 torch.manualSeed(8765467*(opt.id + 1))
 
 print(c.blue '==>' ..' loading data')
-provider = torch.load 'provider.t7'
+--SV DEBUG
+
+if (opt.model == 'simple') then
+  require 'cubic_provider'
+  --provider = Provider()
+  --torch.save('cubic_provider.t7', provider)
+  provider = torch.load('cubic_provider.t7')
+else
+  dofile './provider.lua'
+  provider = torch.load 'provider.t7'
+end
+
+
 provider.trainData.data = provider.trainData.data:float()
 provider.testData.data = provider.testData.data:float()
 
@@ -138,7 +153,13 @@ parameters,gradParameters = model:getParameters()
 
 
 print(c.blue'==>' ..' setting criterion')
-criterion = cast(nn.CrossEntropyCriterion())
+--SV DEBUG
+if (opt.model == 'simple') then
+  criterion = cast(nn.MSECriterion())
+else
+  criterion = cast(nn.CrossEntropyCriterion())
+end
+
 
 function copy2(obj)
   if type(obj) ~= 'table' then return obj end
@@ -164,11 +185,12 @@ sesopConfig = {
           learningRateDecay = opt.learningRateDecay,
         }, --placeholder state for the inner optimization function.
         
-        sesopBatchSize=sesop_batch_size,
+        sesopBatchSize=opt.sesop_batch_size,
         numNodes=opt.num_of_nodes,
         nodeIters=opt.merge_freq,
         histSize=opt.history_size,
-        merger=opt.merger
+        merger=opt.merger,
+        model=model
 }  
 print(sesopConfig)
 
@@ -176,26 +198,26 @@ print(sesopConfig)
 
 if(opt.num_of_nodes > 1) then
   if (opt.id == 0) then
-    sesopConfig.master = Master(parameters, opt.num_of_nodes - 1, opt.port)
+    sesopConfig.master = Master(parameters, opt.num_of_nodes - 1, opt.port) 
   end
 
   if (opt.id > 0) then
     sesopConfig.worker = Worker(opt.id, opt.port)
   end
+  
 end
 
+inEpochTrainError = torch.zeros((opt.max_epoch + 1)*(provider.trainData.data:size(1)/opt.batchSize))
+inEpochTestError = torch.zeros((opt.max_epoch + 1)*(provider.trainData.data:size(1)/opt.batchSize))
 
-trainLoss = torch.Tensor(opt.max_epoch + 1)
-trainError = torch.Tensor(opt.max_epoch + 1)
-testError = torch.Tensor(opt.max_epoch + 1)
+trainLoss = torch.zeros(opt.max_epoch + 1)
+trainError = torch.zeros(opt.max_epoch + 1)
+testError = torch.zeros(opt.max_epoch + 1)
+times = torch.Tensor(opt.max_epoch + 1)
 
 function train()
   model:training()
-  epoch = epoch or 1
   iter = iter or 1
-  trainLoss[epoch] = 0
-  trainError[epoch] = 0
-  
   
   -- drop learning rate every "epoch_step" epochs
   if epoch % opt.epoch_step == 0 then 
@@ -228,65 +250,83 @@ function train()
       local _targets = ftargets or targets
         
       local outputs = model:forward(_inputs)
-      local f = criterion:forward(outputs, _targets)
       
+      --SV DEBUG
+      local f = criterion:forward(outputs, _targets:cuda())
+      --print(f)
       --save the full train loss to evaluate SESOP
-      iter = iter + 1
-      
-      trainLoss[epoch] = trainLoss[epoch] + f
-      local df_do = criterion:backward(outputs, _targets)
+      --SV DEBUG
+      local df_do = criterion:backward(outputs, _targets:cuda())
       model:backward(_inputs, df_do)
-        
-      --we only add the non sesop batches
-      if finputs == nil then
-        confusion:batchAdd(outputs, _targets)
-      end
       
       return f,gradParameters
     end
       
     optim.seboost(feval, parameters, sesopConfig, optimState)
+    
+    --inEpochTrainError[iter] = messureError(provider.trainData)
+    --inEpochTestError[iter] = messureError(provider.testData)
+    torch.save(opt.save..'/inEpochTrainError.txt', inEpochTrainError)
+    torch.save(opt.save..'/inEpochTestError.txt', inEpochTestError)
+  
+    --print('Train error:', (inEpochTrainError[iter]))
+    --print('Test error:', (inEpochTestError[iter]))
+    iter = iter + 1
+  
   end
   
-  confusion:updateValids()
-
-  trainLoss[epoch] =  trainLoss[epoch]/(#indices)
-  trainError[epoch] = 1 - confusion.totalValid
-  torch.save(opt.save..'/trainLoss.txt', trainLoss)
-  torch.save(opt.save..'/trainError.txt', trainError)
-  torch.save(opt.save..'/epoch.txt', epoch)
-  
-  print(('Train accuracy: '..c.cyan'%.2f'..' %%\t time: %.2f s'):format(
-        confusion.totalValid * 100, torch.toc(tic)))
-
-  train_acc = confusion.totalValid * 100
-
-  confusion:zero()
-  epoch = epoch + 1
 end
 
+--return the Test/Train Error (not the loss unless its MSE!)
+function messureError(data)
+  model:evaluate()
+  confusion:zero()
+  --print('testing... model = ')
+  --print(parameters)
+  --print(':::::::::::::::::::::::::::')
+  local regressionError = 0
+  local bs = 125
+  for i=1,data.data:size(1),bs do
+    local outputs = model:forward(data.data:narrow(1,i,bs))
+    --SV DEBUG
+    if (opt.model ~= 'simple') then
+      confusion:batchAdd(outputs, data.labels:narrow(1,i,bs))
+    else
+      currError = criterion:forward(outputs, data.labels:narrow(1,i,bs):cuda())
+      regressionError = regressionError + currError
+    end
+  end
+  
+  if (opt.model == 'simple') then
+    --print (regressionError/(data.data:size(1)/bs))
+    return regressionError/(data.data:size(1)/bs)
+  else
+    confusion:updateValids()
+    return 1 - confusion.totalValid
+  end
+  
+end
 
 function test()
   -- disable flips, dropouts and batch normalization
-  model:evaluate()
   print(c.blue '==>'.." testing")
 
-  local bs = 125
-  for i=1,provider.testData.data:size(1),bs do
-    local outputs = model:forward(provider.testData.data:narrow(1,i,bs))
-    confusion:batchAdd(outputs, provider.testData.labels:narrow(1,i,bs))
-  end
+  testError[epoch] = messureError(provider.testData)
+  trainError[epoch] = messureError(provider.trainData)
+  --trainLoss[epoch] =  trainLoss[epoch]/(#indices)
   
-  confusion:updateValids()
-  
-  testError[epoch] = 1 - confusion.totalValid
+  print('Train accuracy:', (1 - trainError[epoch]) * 100)
+  print('Test accuracy:', (1 - testError[epoch]) * 100)
+    
+  torch.save(opt.save..'/trainLoss.txt', trainLoss)
+  torch.save(opt.save..'/trainError.txt', trainError)
   torch.save(opt.save..'/testError.txt', testError)
   
-  print('Test accuracy:', confusion.totalValid * 100)
+  
   
   if testLogger then
     paths.mkdir(opt.save)
-    testLogger:add{train_acc, confusion.totalValid * 100}
+    testLogger:add{train_acc, (1 - testError[epoch]) * 100}
     testLogger:style{'-','-'}
     testLogger:plot()
 
@@ -333,9 +373,7 @@ function test()
 end
 
 local timer = torch.Timer()
-
-times = torch.Tensor(opt.max_epoch + 1)
-
+epoch = 1
 for i=1,opt.max_epoch do
   timer:reset()
   train()
@@ -343,6 +381,9 @@ for i=1,opt.max_epoch do
   torch.save(opt.save..'/epochTimes.txt', times)
   
   test()
+  
+  torch.save(opt.save..'/epoch.txt', epoch)
+  epoch = epoch + 1
 end
 
 
