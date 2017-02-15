@@ -182,8 +182,8 @@ function optim.seboost(opfunc, x, config, state)
     end
     --x,f(x)
     --config.maxIter = config.numNodes + config.histSize
-    config.maxIter = config.histSize + config.numNodes + 20
-    
+    --config.maxIter = config.histSize + config.numNodes + 20
+    config.maxIter = 200
     local _ = nil
     local fHist = nil
     
@@ -212,9 +212,26 @@ function optim.seboost(opfunc, x, config, state)
       fHist = bestF
       state.aOpt[bestIdx] = 1
     else
+      state.starting_norms = state.starting_norms or torch.zeros(1)
+      state.starting_norms = torch.cat(state.starting_norms, config.model:forward(sesopInputs):norm()*torch.ones(1), 1)
+      torch.save(config.save..'/starting_norms.txt', state.starting_norms)
+  
       --state.aOpt:copy(torch.zeros(config.numNodes + config.histSize))
       state.aOpt:copy(torch.ones(config.numNodes + config.histSize)*(1/(config.numNodes + config.histSize))) --avrage
+      
+      for k,v in pairs(config.model:findModules('nn.FixableBatchNormalization')) do
+        --v.fix = true
+        v.train = false
+      end
+      
+      --x,fx,i,dfx
       _, fHist = optim.cg(feval, state.aOpt, config, state) --Apply optimization using inner function
+      
+      for k,v in pairs(config.model:findModules('nn.FixableBatchNormalization')) do
+        --v.fix = false
+        v.train = true
+      end
+      
     end
   
     --updating model weights!
@@ -225,11 +242,17 @@ function optim.seboost(opfunc, x, config, state)
     --Tao code update the history direction here
     if config.histSize ~= 0 then
       if config.histSize == 1 then
-        state.histspace = x - xInit
+        state.histspace = sesopDir
       else
-      --we throw out the vector in column state.histSize
-      --we insert instead a new vector in column 1.
-      state.histspace = torch.cat(x - xInit, state.histspace:narrow(2, 1, config.histSize - 1), 2)
+        --we throw out the vector in column state.histSize
+        --we insert instead a new vector in column 1.
+        state.histspace = torch.cat(sesopDir, state.histspace:narrow(2, 1, config.histSize - 1), 2)
+        
+        --for i = 1, config.numNodes - 1 do   
+          --[{ {}, i }] means: all of the first dim, slice in the second dim at i = get i col.
+        --  state.dirs[{ {}, i + 1 }]:copy(config.master.remote_models[i - 1] - state.splitPoint)
+        --end
+    
       end
     end
   
